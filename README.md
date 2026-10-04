@@ -51,8 +51,14 @@ python app.py          # 默认监听 8000 端口，可用 PORT 环境变量修�
    （说话人、半开时间区间、允许 / 拒绝媒介、解禁日期），先点「试算（不写入）」
    查看合并前后的时间轴对比；确认整条时间轴均可发布后点「补件并写入」一次性落库。
    仍有阻断时不落任何记录，并列出每个阻断区间及原因。
+7. **发行凭据**：正式发行前点「校验并封存凭据」—— 系统在同一事务中读取
+   时长、说话人、发言与授权并按既有规则校验，仅当整条时间轴全部可发布时
+   才保存不可修改的凭据（封存当时的完整输入与校验结果），失败不留记录。
+   凭据列表实时标注当前状态（与发行时一致 / 待复核 / 来源缺失），
+   点「查阅」可对比发行时结论与当前复核结果。
 
-所有记录均可在页面上直接修改、保存或删除。
+访谈、说话人、发言与授权记录均可在页面上直接修改、保存或删除；
+发行凭据封存后不可修改、不可删除，原访谈删除后仍可查阅。
 
 ## 补件并复核（批量补授权）
 
@@ -117,6 +123,47 @@ curl -s -X POST http://localhost:8000/api/interviews/1/remediate \
                         "allow_media": ["audio"], "note": "补签授权"}]}'
 ```
 
+## 发行凭据（可追溯封存）
+
+正式发行前，可为「访谈 + 发布日期 + 媒介」封存一份**不可修改**的发行凭据。
+`POST /api/interviews/<id>/credentials` 在同一 SQLite 事务（`BEGIN IMMEDIATE`）中：
+
+1. 读取访谈时长、说话人、发言区间与授权区间，按既有规则校验整条时间轴；
+2. **只有全部区间可发布才落库**：凭据封存当时的完整输入
+   （时长 / 说话人 / 发言 / 授权）与校验结果（合并区间 + 汇总）；
+3. 仍有阻断区间时回滚，**失败不留任何记录**
+   （HTTP 409，返回每个阻断区间及原因）。
+
+凭据不可修改、不可删除（数据库触发器保证），也不随原访谈删除而消失。
+
+查阅凭据（`GET /api/credentials/<id>`）时保留发行时结论，并在一致的读取快照
+（同一事务）中比较现有资料、重新校验，得出当前状态：
+
+| 状态 | 含义 |
+| --- | --- |
+| `valid` 与发行时一致 | 时长、说话人、发言、授权均无变化 |
+| `review` 待复核 | 任一资料有变化 —— 即便重新校验仍可发布；`current.blocked` 列出当前阻断区间 |
+| `missing` 来源缺失 | 原访谈已删除；封存的发行时结论仍可查看（`current` 为 null） |
+
+```bash
+# 封存凭据（沿用上文已补全授权的访谈 #1）
+curl -s -X POST http://localhost:8000/api/interviews/1/credentials \
+  -H 'Content-Type: application/json' \
+  -d '{"publication_date": "2026-10-04", "medium": "audio"}'
+
+# 凭据列表（含当前状态）与凭据详情（发行时结论 + 当前复核）
+curl -s http://localhost:8000/api/credentials
+curl -s http://localhost:8000/api/credentials/1
+```
+
+详情响应要点：
+
+- `sealed.inputs` / `sealed.result`：封存的完整输入与发行时校验结论（不可修改）；
+- `status` / `status_label` / `changes`：当前状态与发生变化的资料类别
+  （时长 / 说话人 / 发言 / 授权）；
+- `current.intervals` / `current.blocked`：按封存的发布日期与媒介对现有资料
+  重新校验的结果与当前阻断区间；来源缺失时 `current` 为 null。
+
 ## 数据持久化
 
 - 容器内数据库为 `/data/oral_history.db`，Compose / 运行命令已挂载卷 `oral_history_data`，重启不丢数据。
@@ -138,13 +185,18 @@ curl -s -X POST http://localhost:8000/api/interviews/1/remediate \
 | PUT / DELETE | `/api/licenses/<id>` | 修改 / 删除授权 |
 | POST | `/api/interviews/<id>/evaluate` | 校验 `{publication_date, medium}`，返回合并后的时间码区间与原因 |
 | POST | `/api/interviews/<id>/remediate` | 补件并复核 `{publication_date, medium, commit, supplements}`，同一事务试算 + 满足条件才一次性写入 |
+| POST | `/api/interviews/<id>/credentials` | 封存发行凭据 `{publication_date, medium}`：同一事务校验，全部可发布才落库，失败不留记录 |
+| GET | `/api/credentials` | 凭据列表（含当前状态：与发行时一致 / 待复核 / 来源缺失） |
+| GET | `/api/credentials/<id>` | 凭据详情：发行时结论 + 一致读取快照中的当前复核（变化类别、当前阻断区间） |
 
 ## 运行测试
 
 ```bash
 python -m unittest test_evaluator.py -v   # 核心校验逻辑 + 补件批次校验（纯 Python）
 python -m unittest test_remediation.py -v # 补件事务编排（纯 Python + SQLite）
-python -m unittest test_remediate_api.py -v  # HTTP 层（需 Flask，Docker 镜像内可运行）
+python -m unittest test_credentials.py -v # 发行凭据事务编排（纯 Python + SQLite）
+python -m unittest test_remediate_api.py -v  # 补件接口 HTTP 层（需 Flask，Docker 镜像内可运行）
+python -m unittest test_credential_api.py -v # 凭据接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 node test_frontend.js                     # 前端交互冒烟测试（可选，需 Node）
 ```
 
@@ -154,9 +206,12 @@ node test_frontend.js                     # 前端交互冒烟测试（可选，
 app.py               Flask 应用与 REST API（SQLite 持久化）
 evaluator.py         核心校验逻辑：切分时间轴、逐段判定、相邻合并、补件批次校验
 remediation.py       补件并复核：同一 SQLite 事务中的试算与一次性写入
+credentials.py       发行凭据：同一事务中校验并封存，查阅时在一致快照中复核现状
 test_evaluator.py    核心逻辑单元测试
 test_remediation.py  补件事务编排单元测试（不依赖 Flask）
+test_credentials.py  发行凭据事务编排单元测试（不依赖 Flask）
 test_remediate_api.py 补件接口 HTTP 层测试（需 Flask）
+test_credential_api.py 凭据接口 HTTP 层测试（需 Flask）
 templates/index.html 单页界面
 static/app.js        前端交互（原生 JavaScript）
 static/style.css     样式

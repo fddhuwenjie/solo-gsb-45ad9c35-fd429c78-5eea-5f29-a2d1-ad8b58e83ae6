@@ -6,6 +6,7 @@ from datetime import date
 
 from flask import Flask, g, jsonify, render_template, request
 
+import credentials
 from evaluator import MEDIA_LABELS, evaluate_timeline
 from remediation import run_remediation
 
@@ -44,6 +45,25 @@ CREATE TABLE IF NOT EXISTS licenses (
     note TEXT NOT NULL DEFAULT '',
     CHECK (start_seconds >= 0 AND end_seconds > start_seconds)
 );
+-- 发行凭据：封存当时的完整输入（snapshot）与校验结果（result），
+-- 不设外键 —— 原访谈删除后历史凭据仍可查看（状态「来源缺失」）。
+CREATE TABLE IF NOT EXISTS release_credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    interview_id INTEGER NOT NULL,
+    interview_title TEXT NOT NULL,
+    medium TEXT NOT NULL,
+    publication_date TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    result TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- 凭据不可修改、不可删除（可追溯）
+CREATE TRIGGER IF NOT EXISTS release_credentials_no_update
+BEFORE UPDATE ON release_credentials
+BEGIN SELECT RAISE(ABORT, '发行凭据不可修改'); END;
+CREATE TRIGGER IF NOT EXISTS release_credentials_no_delete
+BEFORE DELETE ON release_credentials
+BEGIN SELECT RAISE(ABORT, '发行凭据不可删除'); END;
 """
 
 app = Flask(__name__)
@@ -525,6 +545,43 @@ def remediate(iid):
         commit=bool(data.get("commit")),
     )
     return jsonify(result), status
+
+
+# ---------------------------------------------------------------- 发行凭据
+
+@app.post("/api/interviews/<int:iid>/credentials")
+def create_release_credential(iid):
+    """校验并封存发行凭据：同一事务内读取时长、说话人、发言与授权，
+    按既有规则校验；仅当整条时间轴全部可发布时才保存不可修改的凭据
+    （封存当时的完整输入与校验结果），失败不留任何记录。"""
+    data = payload()
+    medium = data.get("medium")
+    if medium not in MEDIA:
+        return error("媒介必须是 audio（音频）或 text（文字）")
+    publication_date = parse_date_field(data.get("publication_date"))
+    if not publication_date or publication_date == "invalid":
+        return error("发布日期不能为空且格式应为 YYYY-MM-DD")
+    result, status = credentials.create_credential(
+        get_db(), interview_id=iid,
+        publication_date=publication_date, medium=medium)
+    return jsonify(result), status
+
+
+@app.get("/api/credentials")
+def list_release_credentials():
+    """凭据列表（含当前状态：与发行时一致 / 待复核 / 来源缺失）。"""
+    return jsonify(credentials.list_credentials(get_db()))
+
+
+@app.get("/api/credentials/<int:cid>")
+def release_credential_detail(cid):
+    """凭据详情：保留发行时结论，并在一致读取快照中比较现有资料、
+    重新校验 —— 资料有变化标为「待复核」并列出当前阻断区间；
+    原访谈已删除时标为「来源缺失」，历史凭据仍可查看。"""
+    review = credentials.credential_review(get_db(), cid)
+    if review is None:
+        return error("凭据不存在", 404)
+    return jsonify(review)
 
 
 if __name__ == "__main__":

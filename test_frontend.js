@@ -5,7 +5,8 @@
  *  2. 渲染生成的动态行 ID 与各保存函数读取的 ID 一致；
  *  3. 保存发言区间 / 授权时发出的请求体正确；
  *  4. 校验结果渲染包含时间码与状态；
- *  5. 补件批次渲染、试算请求体与试算结果展示。 */
+ *  5. 补件批次渲染、试算请求体与试算结果展示；
+ *  6. 发行凭据列表渲染、封存请求体、409 阻断展示与查阅复核视图。 */
 const fs = require("fs");
 const vm = require("vm");
 const assert = require("assert");
@@ -33,10 +34,19 @@ const sandbox = {
     calls.push({ path, opts });
     const isGet = !opts || !opts.method || opts.method === "GET";
     if (isGet) {
+      if (path === "/api/credentials") {
+        return { ok: true, status: 200, json: async () => sandbox.__credList || [] };
+      }
+      if (path.startsWith("/api/credentials/")) {
+        return { ok: true, status: 200, json: async () => sandbox.__credDetail };
+      }
       return { ok: true, status: 200, json: async () => sandbox.__test__.state.detail };
     }
     if (path.endsWith("/remediate")) {
       return { ok: true, status: 200, json: async () => sandbox.__remResponse };
+    }
+    if (path.endsWith("/credentials") && opts && opts.method === "POST") {
+      return sandbox.__credCreate();
     }
     return { ok: true, status: 200, json: async () => ({}) };
   },
@@ -44,7 +54,7 @@ const sandbox = {
 vm.createContext(sandbox);
 const code = fs.readFileSync("static/app.js", "utf8");
 vm.runInContext(
-  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, fmt, parseTimecode, renderRemediate, submitRemediate };",
+  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, createCredential, viewCredential };",
   sandbox
 );
 const T = sandbox.__test__;
@@ -173,6 +183,103 @@ async function main() {
   const remResultHtml = elements.get("remediate-result").innerHTML;
   assert.ok(remResultHtml.includes("试算通过"), "试算结果应提示通过");
   assert.ok(remResultHtml.includes("00:00:00 – 01:00:00"), "试算结果应含变更后区间");
+
+  // 7. 发行凭据：列表渲染、封存请求体、409 阻断展示与查阅复核视图
+  T.state.credentials = [{
+    id: 5, interview_id: 1, interview_title: "示例",
+    medium: "audio", publication_date: "2026-10-04",
+    created_at: "2026-10-04 08:00:00",
+    status: "review", status_label: "待复核", changes: ["授权"],
+  }];
+  T.renderCredentials();
+  const credHtml = elements.get("credentials-body").innerHTML;
+  assert.ok(credHtml.includes("badge review"), "凭据列表应含待复核徽章");
+  assert.ok(credHtml.includes("变化：授权"), "凭据列表应标注变化类别");
+
+  // 封存成功：请求体正确，提示已封存
+  el("pub-date").value = "2026-10-04";
+  el("medium").value = "audio";
+  sandbox.__credCreate = () => ({
+    ok: true, status: 201,
+    json: async () => ({
+      id: 6, interview_id: 1, interview_title: "示例",
+      medium: "audio", publication_date: "2026-10-04",
+      created_at: "2026-10-04 09:00:00", created: true,
+      result: { intervals: [], summary: { duration_seconds: 3600, blocked_seconds: 0, publishable_seconds: 3600 } },
+    }),
+  });
+  await T.createCredential();
+  const credPost = calls.filter(
+    (c) => c.path.endsWith("/credentials") && c.opts && c.opts.method === "POST").pop();
+  assert.ok(credPost, "应发出封存凭据请求");
+  assert.deepStrictEqual(JSON.parse(credPost.opts.body),
+    { publication_date: "2026-10-04", medium: "audio" });
+  assert.ok(elements.get("credential-detail").innerHTML.includes("凭据 #6 已封存"));
+
+  // 封存失败（409）：展示阻断区间，不落记录
+  sandbox.__credCreate = () => ({
+    ok: false, status: 409,
+    json: async () => ({
+      interview_id: 1, medium: "audio", publication_date: "2026-10-04",
+      created: false, error: "仍有 1 个不可发布区间，未保存凭据",
+      intervals: [],
+      summary: { duration_seconds: 3600, blocked_seconds: 600, publishable_seconds: 3000 },
+      blocked: [{
+        start_seconds: 0, end_seconds: 600,
+        start_timecode: "00:00:00", end_timecode: "00:10:00",
+        status: "blocked", status_label: "不可发布",
+        speakers: ["张三"], reasons: ["张三：缺少覆盖该区间的授权记录（缺项）"],
+      }],
+    }),
+  });
+  await assert.rejects(T.createCredential(), /未保存凭据/);
+  const failHtml = elements.get("credential-detail").innerHTML;
+  assert.ok(failHtml.includes("00:00:00 – 00:10:00"), "409 应展示阻断区间");
+
+  // 查阅：待复核 + 发行时结论 + 当前阻断区间
+  sandbox.__credDetail = {
+    id: 5, interview_id: 1, interview_title: "示例",
+    medium: "audio", publication_date: "2026-10-04",
+    created_at: "2026-10-04 08:00:00",
+    status: "review", status_label: "待复核", changes: ["授权"],
+    sealed: {
+      inputs: { duration_seconds: 3600, speakers: [], segments: [], licenses: [] },
+      result: {
+        intervals: [{
+          start_seconds: 0, end_seconds: 3600,
+          start_timecode: "00:00:00", end_timecode: "01:00:00",
+          status: "ok", status_label: "可发布", publishable: true,
+          speakers: ["张三"], reasons: [],
+        }],
+        summary: { duration_seconds: 3600, blocked_seconds: 0, publishable_seconds: 3600 },
+      },
+    },
+    current: {
+      inputs: {},
+      intervals: [],
+      summary: { duration_seconds: 3600, blocked_seconds: 600, publishable_seconds: 3000 },
+      blocked: [{
+        start_seconds: 600, end_seconds: 1200,
+        start_timecode: "00:10:00", end_timecode: "00:20:00",
+        status: "blocked", status_label: "不可发布",
+        speakers: ["张三"], reasons: ["张三：许可#1 明确拒绝音频媒介（拒绝优先）"],
+      }],
+    },
+  };
+  await T.viewCredential(5);
+  const detailHtml = elements.get("credential-detail").innerHTML;
+  assert.ok(detailHtml.includes("待复核"), "查阅应显示待复核");
+  assert.ok(detailHtml.includes("发行时结论"), "查阅应保留发行时结论");
+  assert.ok(detailHtml.includes("00:10:00 – 00:20:00"), "查阅应列出当前阻断区间");
+
+  // 查阅：来源缺失（原访谈已删除，历史凭据仍可查看）
+  sandbox.__credDetail = {
+    ...sandbox.__credDetail,
+    status: "missing", status_label: "来源缺失", changes: [], current: null,
+  };
+  await T.viewCredential(5);
+  assert.ok(elements.get("credential-detail").innerHTML.includes("来源缺失"),
+    "原访谈删除后应显示来源缺失");
 
   console.log("test_frontend.js: 全部通过");
 }

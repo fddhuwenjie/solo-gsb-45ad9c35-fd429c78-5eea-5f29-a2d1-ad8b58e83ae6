@@ -13,6 +13,8 @@ const state = {
   detail: null, // {id, title, duration_seconds, speakers, segments, licenses}
   remBatch: [], // 补件批次草稿 [{speaker_id, start, end, allow, deny, embargo, note}]
   remResult: null, // 最近一次补件试算 / 写入结果
+  credentials: [], // 发行凭据列表（含当前状态）
+  credentialDetail: null, // 正在查阅的凭据复核视图
 };
 
 const $ = (id) => document.getElementById(id);
@@ -93,6 +95,13 @@ async function refreshDetail() {
   state.detail = state.currentId
     ? await api(`/api/interviews/${state.currentId}`)
     : null;
+  // 资料变化会影响凭据状态（待复核 / 来源缺失），随访谈详情一并刷新
+  state.credentials = await api("/api/credentials");
+}
+
+async function loadCredentials() {
+  state.credentials = await api("/api/credentials");
+  renderCredentials();
 }
 
 /* ---------- 渲染 ---------- */
@@ -104,6 +113,8 @@ function render() {
         `<option value="${i.id}" ${i.id === state.currentId ? "selected" : ""}>`
         + `#${i.id} ${esc(i.title)}（${fmt(i.duration_seconds)}）</option>`).join("")
     : `<option value="">（暂无访谈，请先新建）</option>`;
+
+  renderCredentials(); // 凭据列表与访谈选择无关，始终渲染
 
   const has = !!state.detail;
   $("detail-panels").classList.toggle("hidden", !has);
@@ -516,6 +527,128 @@ async function submitRemediate(commit) {
   }
 }
 
+/* ---------- 发行凭据 ---------- */
+
+function mediumLabel(value) {
+  return value === "audio" ? "音频" : "文字";
+}
+
+function statusBadge(status, label) {
+  return `<span class="badge ${status}">${esc(label)}</span>`;
+}
+
+function renderCredentials() {
+  const rows = state.credentials.map((c) => `
+    <tr>
+      <td>#${c.id}</td>
+      <td>${esc(c.interview_title)}</td>
+      <td>${esc(c.publication_date)}</td>
+      <td>${mediumLabel(c.medium)}</td>
+      <td class="tc">${esc(c.created_at)}</td>
+      <td>${statusBadge(c.status, c.status_label)}${c.changes.length
+        ? `<br><span class="hint">变化：${esc(c.changes.join("、"))}</span>` : ""}</td>
+      <td><button onclick="run(() => viewCredential(${c.id}))">查阅</button></td>
+    </tr>`).join("");
+  $("credentials-body").innerHTML =
+    rows || `<tr><td colspan="7" class="empty">暂无发行凭据</td></tr>`;
+}
+
+function intervalsTableHtml(intervals) {
+  return `
+    <table>
+      <thead>
+        <tr><th>区间（时间码）</th><th>时长</th><th>结果</th><th>说话人</th><th>原因 / 说明</th></tr>
+      </thead>
+      <tbody>${intervalRowsHtml(intervals)}</tbody>
+    </table>`;
+}
+
+/* 封存失败（409）：展示阻断区间，不落任何记录 */
+function renderCredentialFailure(data) {
+  $("credential-detail").innerHTML = `
+    <p class="bad-text">✘ ${esc(data.error)}</p>
+    <p class="hint">可发布 ${fmt(data.summary.publishable_seconds)} / 共 `
+    + `${fmt(data.summary.duration_seconds)}（阻断 ${fmt(data.summary.blocked_seconds)}），`
+    + `未保存任何凭据记录。</p>
+    ${intervalsTableHtml(data.blocked)}`;
+}
+
+function renderCredentialDetail() {
+  const d = state.credentialDetail;
+  const box = $("credential-detail");
+  if (!d) {
+    box.innerHTML = "";
+    return;
+  }
+  const sealed = d.sealed.result.summary;
+  let html = `
+    <h3>凭据 #${d.id} · ${esc(d.interview_title)}</h3>
+    <div class="summary">
+      发布日期 <b>${esc(d.publication_date)}</b> · 媒介 <b>${mediumLabel(d.medium)}</b>
+      · 封存于 <b class="tc">${esc(d.created_at)}</b>
+      · 当前状态 ${statusBadge(d.status, d.status_label)}${d.changes.length
+        ? `（变化：${esc(d.changes.join("、"))}）` : ""}
+    </div>
+    <h4>发行时结论（封存，不可修改）</h4>
+    <p class="hint">总时长 ${fmt(sealed.duration_seconds)}，`
+    + `可发布 ${fmt(sealed.publishable_seconds)}，`
+    + `阻断 ${fmt(sealed.blocked_seconds)}。</p>
+    ${intervalsTableHtml(d.sealed.result.intervals)}`;
+  if (d.status === "missing") {
+    html += `<p class="bad-text">来源缺失：原访谈已删除，无法重新校验；`
+      + `以上为该凭据封存时的发行结论，仍可查阅。</p>`;
+  } else {
+    html += `<h4>当前复核（一致读取快照中重新校验）</h4>`;
+    if (d.changes.length) {
+      html += `<p class="bad-text">时长 / 说话人 / 发言 / 授权有变化`
+        + `（${esc(d.changes.join("、"))}），标记为「待复核」`
+        + `${d.current.blocked.length ? "。" : "；当前重新校验仍可发布。"}</p>`;
+    } else {
+      html += `<p class="ok-text">✔ 现有资料与发行时一致。</p>`;
+    }
+    html += d.current.blocked.length
+      ? `<p class="bad-text">当前存在 ${d.current.blocked.length} 个阻断区间：</p>`
+        + intervalsTableHtml(d.current.blocked)
+      : `<p class="hint">当前无阻断区间。</p>`;
+  }
+  box.innerHTML = html;
+}
+
+async function createCredential() {
+  if (!state.currentId) throw new Error("请先选择访谈");
+  const publication_date = $("pub-date").value;
+  const medium = $("medium").value;
+  if (!publication_date) throw new Error("请选择发布日期");
+  let resp;
+  try {
+    resp = await fetch(`/api/interviews/${state.currentId}/credentials`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ publication_date, medium }),
+    });
+  } catch (e) {
+    throw new Error("无法连接服务器");
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (resp.status === 409) {
+    // 仍有阻断区间：展示阻断明细，不落任何记录
+    state.credentialDetail = null;
+    renderCredentialFailure(data);
+    throw new Error(data.error || "仍存在不可发布区间，未保存凭据");
+  }
+  if (!resp.ok) throw new Error(data.error || `请求失败（HTTP ${resp.status}）`);
+  state.credentialDetail = null;
+  $("credential-detail").innerHTML =
+    `<p class="ok-text">✔ 整条时间轴均可发布，凭据 #${data.id} 已封存`
+    + `（不可修改，可点击下方「查阅」复核）。</p>`;
+  await loadCredentials();
+}
+
+async function viewCredential(id) {
+  state.credentialDetail = await api(`/api/credentials/${id}`);
+  renderCredentialDetail();
+}
+
 /* ---------- 启动 ---------- */
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -531,6 +664,8 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-rem-add").addEventListener("click", () => run(addRemRow));
   $("btn-rem-dry").addEventListener("click", () => run(() => submitRemediate(false)));
   $("btn-rem-commit").addEventListener("click", () => run(() => submitRemediate(true)));
+  $("btn-create-credential").addEventListener("click", () => run(createCredential));
+  $("btn-refresh-credentials").addEventListener("click", () => run(loadCredentials));
   $("interview-select").addEventListener("change", (e) => run(async () => {
     state.currentId = Number(e.target.value) || null;
     state.remBatch = [];

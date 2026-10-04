@@ -154,6 +154,15 @@ td.empty { color: var(--mute); text-align: center; }
 .badge.blocked { background: var(--bad-bg); color: var(--bad); }
 .badge.no_speech { background: var(--mute-bg); color: var(--mute); }
 
+/* 凭据复核状态 */
+.badge.valid { background: var(--ok-bg); color: var(--ok); }
+.badge.review { background: #fdf0d5; color: #8a5a00; }
+.badge.missing { background: var(--mute-bg); color: var(--mute); }
+
+#credential-detail h3 { font-size: 15px; margin: 16px 0 8px; }
+#credential-detail h4 { font-size: 14px; margin: 14px 0 6px; }
+#credential-detail:empty { display: none; }
+
 td.tc { font-family: ui-monospace, Consolas, monospace; white-space: nowrap; }
 
 tr.blocked td { background: #fdf3f3; }

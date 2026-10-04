@@ -9,7 +9,7 @@
 <body>
 <header class="site-header">
   <h1>口述史发布许可校验台</h1>
-  <p class="subtitle">按发言与授权边界切分时间轴 · 拒绝优先 · 冲突 / 缺项 / 未解禁逐段标注 · 本地运行</p>
+  <p class="subtitle">按发言与授权边界切分时间轴 · 拒绝优先 · 冲突 / 缺项 / 未解禁逐段标注 · 发行凭据可追溯封存 · 本地运行</p>
 </header>
 
 <main>
@@ -149,9 +149,34 @@
     </section>
   </div>
 
+  <section class="card" id="credentials-card">
+    <h2>7. 发行凭据</h2>
+    <p class="hint">
+      选择访谈、发布日期与媒介后封存凭据：系统在同一事务中读取时长、说话人、发言与授权
+      并按既有规则校验，仅当整条时间轴全部可发布时才保存不可修改的凭据
+      （封存当时的完整输入与校验结果），失败不留记录。
+      查阅凭据时保留发行时结论，并在一致的读取快照中比较现有资料、重新校验：
+      时长、说话人、发言或授权有任何变化即标为「待复核」（即便仍可发布），并列出当前阻断区间；
+      原访谈被删除时显示「来源缺失」，历史凭据仍可查看。
+    </p>
+    <div class="row">
+      <button id="btn-create-credential" class="primary">校验并封存凭据</button>
+      <button id="btn-refresh-credentials">刷新凭据列表</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th><th>访谈</th><th>发布日期</th><th>媒介</th>
+          <th>封存时间</th><th>当前状态</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="credentials-body"></tbody>
+    </table>
+    <div id="credential-detail"></div>
+  </section>
+
   <p id="status-line" role="status"></p>
 </main>
-
 <script src="/static/app.js"></script>
 </body>
 </html>
