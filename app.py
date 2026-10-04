@@ -6,6 +6,7 @@ from datetime import date
 
 from flask import Flask, g, jsonify, render_template, request
 
+from credentials import issue_credential, list_credentials, describe_credential
 from evaluator import MEDIA_LABELS, evaluate_timeline
 from remediation import run_remediation
 
@@ -43,6 +44,16 @@ CREATE TABLE IF NOT EXISTS licenses (
     embargo_until TEXT,
     note TEXT NOT NULL DEFAULT '',
     CHECK (start_seconds >= 0 AND end_seconds > start_seconds)
+);
+CREATE TABLE IF NOT EXISTS credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    interview_id INTEGER NOT NULL,
+    interview_title TEXT NOT NULL,
+    publication_date TEXT NOT NULL,
+    medium TEXT NOT NULL CHECK (medium IN ('audio', 'text')),
+    input_snapshot TEXT NOT NULL,
+    evaluation_result TEXT NOT NULL,
+    sealed_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 
@@ -525,6 +536,50 @@ def remediate(iid):
         commit=bool(data.get("commit")),
     )
     return jsonify(result), status
+
+
+# ---------------------------------------------------------------- 发行凭据
+
+def _parse_issuance(data):
+    """解析凭据封存请求的发布日期与媒介，返回 (medium, date, 错误消息)。"""
+    medium = data.get("medium")
+    if medium not in MEDIA:
+        return None, None, "媒介必须是 audio（音频）或 text（文字）"
+    publication_date = parse_date_field(data.get("publication_date"))
+    if not publication_date or publication_date == "invalid":
+        return None, None, "发布日期不能为空且格式应为 YYYY-MM-DD"
+    return medium, publication_date, None
+
+
+@app.post("/api/interviews/<int:iid>/credentials")
+def create_credential(iid):
+    """封存发行凭据：同一事务内读取时长 / 说话人 / 发言 / 授权并校验，
+    仅当整条时间轴可发布才保存不可修改的凭据；失败（含仍有阻断区间，
+    HTTP 409）不留任何记录。"""
+    data = payload()
+    medium, publication_date, problem = _parse_issuance(data)
+    if problem:
+        return error(problem)
+    result, status = issue_credential(
+        get_db(), interview_id=iid,
+        publication_date=publication_date, medium=medium)
+    return jsonify(result), status
+
+
+@app.get("/api/credentials")
+def credentials_index():
+    """凭据列表：保留发行时结论，在一致读取快照中对现有资料重新校验，
+    逐条给出 current / pending_review / source_missing 状态。"""
+    return jsonify(list_credentials(get_db()))
+
+
+@app.get("/api/credentials/<int:cred_id>")
+def credential_detail(cred_id):
+    row = get_db().execute(
+        "SELECT * FROM credentials WHERE id = ?", (cred_id,)).fetchone()
+    if not row:
+        return error("发行凭据不存在", 404)
+    return jsonify(describe_credential(get_db(), row))
 
 
 if __name__ == "__main__":

@@ -31,7 +31,18 @@ const sandbox = {
   confirm: () => true,
   fetch: async (path, opts) => {
     calls.push({ path, opts });
-    const isGet = !opts || !opts.method || opts.method === "GET";
+    if (path === "/api/credentials") {
+      return { ok: true, status: 200, json: async () => sandbox.__credList || [] };
+    }
+    if (/\/interviews\/\d+\/credentials$/.test(path)
+        && (!opts || opts.method === "POST")) {
+      return sandbox.__credResponse
+        ?? { ok: true, status: 201, json: async () => ({ id: 0 }) };
+    }
+    if (path.startsWith("/api/credentials/")) {
+      return { ok: true, status: 200, json: async () => sandbox.__credDetail };
+    }
+    const isGet = !opts || opts.method === "GET";
     if (isGet) {
       return { ok: true, status: 200, json: async () => sandbox.__test__.state.detail };
     }
@@ -44,7 +55,7 @@ const sandbox = {
 vm.createContext(sandbox);
 const code = fs.readFileSync("static/app.js", "utf8");
 vm.runInContext(
-  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, fmt, parseTimecode, renderRemediate, submitRemediate };",
+  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, loadCredentials, renderCredentialDetail, showCredential, issueCredential };",
   sandbox
 );
 const T = sandbox.__test__;
@@ -173,6 +184,101 @@ async function main() {
   const remResultHtml = elements.get("remediate-result").innerHTML;
   assert.ok(remResultHtml.includes("试算通过"), "试算结果应提示通过");
   assert.ok(remResultHtml.includes("00:00:00 – 01:00:00"), "试算结果应含变更后区间");
+
+  // 7. 发行凭据：列表渲染与状态徽章
+  const sealedEval = {
+    intervals: [{
+      start_seconds: 0, end_seconds: 3600,
+      start_timecode: "00:00:00", end_timecode: "01:00:00",
+      status: "ok", status_label: "可发布", publishable: true,
+      speakers: ["张三", "李四"], reasons: [],
+    }],
+    summary: { duration_seconds: 3600, blocked_seconds: 0, publishable_seconds: 3600 },
+  };
+  const makeCred = (id, status) => ({
+    id, interview_id: 1, interview_title: "示例",
+    publication_date: "2026-10-04", medium: "audio", sealed_at: "2026-10-04 12:00:00",
+    sealed: {
+      input: { duration_seconds: 3600, speakers: [], segments: [], licenses: [] },
+      evaluation: sealedEval,
+    },
+    recheck: status === "source_missing"
+      ? { status, changes: {}, current: null, blocked: [] }
+      : { status, changes: { duration: status === "pending_review" },
+          current: { summary: sealedEval.summary, intervals: sealedEval.intervals },
+          blocked: status === "pending_review" ? [] : [] },
+  });
+  sandbox.__credList = [makeCred(2, "current"), makeCred(1, "pending_review")];
+  await T.loadCredentials();
+  const credHtml = elements.get("credentials-body").innerHTML;
+  assert.ok(credHtml.includes("#2"), "凭据列表应含凭据编号");
+  assert.ok(credHtml.includes("待复核"), "凭据列表应渲染待复核状态");
+  assert.ok(credHtml.includes("一致"), "凭据列表应渲染一致状态");
+  assert.ok(credHtml.includes("查看凭据"), "凭据列表应可查看详情");
+
+  // 来源缺失（原访谈已删除）：状态显示来源缺失
+  sandbox.__credList = [makeCred(3, "source_missing")];
+  await T.loadCredentials();
+  assert.ok(elements.get("credentials-body").innerHTML.includes("来源缺失"));
+  assert.ok(elements.get("credentials-body").innerHTML.includes("访谈已删除"));
+
+  // 查看凭据：展示封存结论与当前复核
+  sandbox.__credDetail = makeCred(1, "pending_review");
+  await T.showCredential(1);
+  const detailHtml = elements.get("credential-detail").innerHTML;
+  assert.ok(detailHtml.includes("发行时结论"), "详情应含发行时结论");
+  assert.ok(detailHtml.includes("当前复核"), "详情应含当前复核");
+  assert.ok(detailHtml.includes("待复核"), "详情应标注待复核");
+  assert.ok(detailHtml.includes("时长"), "待复核应列出变化项（时长）");
+  assert.ok(detailHtml.includes("00:00:00 – 01:00:00"), "详情应含封存区间");
+
+  // 封存凭据：POST 请求体使用发布日期与媒介，成功后刷新并展开
+  el("pub-date").value = "2026-10-04";
+  el("medium").value = "audio";
+  sandbox.__credResponse = {
+    ok: true, status: 201, json: async () => makeCred(4, "current"),
+  };
+  sandbox.__credList = [makeCred(4, "current")];
+  await T.issueCredential();
+  const credPost = calls.filter(
+    (c) => c.path === "/api/interviews/1/credentials"
+      && c.opts.method === "POST").pop();
+  assert.ok(credPost, "应发出封存凭据请求");
+  assert.deepStrictEqual(JSON.parse(credPost.opts.body),
+    { publication_date: "2026-10-04", medium: "audio" });
+  assert.strictEqual(T.state.credentialDetailId, 4);
+
+  // 封存失败（409）：抛出错误，不留记录；阻断区间渲染到结果区
+  sandbox.__credResponse = null;
+  calls.length = 0;
+  sandbox.fetch = async (path, opts) => {
+    calls.push({ path, opts });
+    if (path === "/api/interviews/1/credentials" && opts.method === "POST") {
+      return {
+        ok: false, status: 409,
+        json: async () => ({
+          error: "整条时间轴存在 1 个不可发布区间，未保存发行凭据",
+          intervals: [{
+            start_seconds: 300, end_seconds: 600,
+            start_timecode: "00:05:00", end_timecode: "00:10:00",
+            status: "blocked", status_label: "不可发布",
+            speakers: ["李四"], reasons: ["李四：缺少覆盖该区间的授权记录（缺项）"],
+          }],
+          summary: { duration_seconds: 600, blocked_seconds: 300, publishable_seconds: 300 },
+          blocked: [{ start_seconds: 300, end_seconds: 600 }],
+        }),
+      };
+    }
+    if (path === "/api/credentials") {
+      return { ok: true, status: 200, json: async () => sandbox.__credList || [] };
+    }
+    return { ok: true, status: 200, json: async () => ({ id: 0 }) };
+  };
+  await T.issueCredential().then(
+    () => { throw new Error("409 时应拒绝"); },
+    (e) => assert.ok(e.message.includes("未保存发行凭据")));
+  assert.ok(elements.get("results-body").innerHTML.includes("00:05:00 – 00:10:00"),
+    "409 时应展示阻断区间");
 
   console.log("test_frontend.js: 全部通过");
 }

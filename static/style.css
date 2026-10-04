@@ -153,6 +153,20 @@ td.empty { color: var(--mute); text-align: center; }
 .badge.ok { background: var(--ok-bg); color: var(--ok); }
 .badge.blocked { background: var(--bad-bg); color: var(--bad); }
 .badge.no_speech { background: var(--mute-bg); color: var(--mute); }
+.badge.missing { background: #fff3e0; color: #a05a00; }
+
+.missing-text { color: #a05a00; }
+
+.credential-view {
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 14px;
+  background: #fafbfc;
+}
+
+.credential-view h3 { margin: 6px 0 10px; font-size: 15px; }
+.credential-view h4 { margin: 14px 0 8px; font-size: 14px; }
 
 td.tc { font-family: ui-monospace, Consolas, monospace; white-space: nowrap; }
 

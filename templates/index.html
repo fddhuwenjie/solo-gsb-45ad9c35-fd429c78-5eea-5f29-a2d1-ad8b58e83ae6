@@ -149,6 +149,34 @@
     </section>
   </div>
 
+  <section class="card" id="credentials-card">
+    <h2>7. 发行凭据</h2>
+    <p class="hint">
+      选择访谈、发布日期与媒介后封存凭据：系统在同一事务中读取时长、说话人、发言与授权并按既有规则校验，
+      仅当整条时间轴可发布时才保存不可修改的凭据，封存当时的完整输入与校验结果；失败不留任何记录。
+      凭据封存后不可修改；再次查看时在一致的读取快照中比较现有资料并重新校验——
+      时长、说话人、发言或授权有任何变化都标为「待复核」（即使仍可发布也列出当前阻断区间）；
+      原访谈被删除时显示「来源缺失」，历史凭据仍可查看。
+    </p>
+    <div id="credential-actions" class="row hidden">
+      <button id="btn-issue-credential" class="primary">为当前访谈封存发行凭据</button>
+      <span class="hint">沿用上方发布日期与媒介；封存后不可修改。</span>
+    </div>
+    <div class="row">
+      <button id="btn-refresh-credentials">刷新凭据</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>凭据</th><th>来源访谈</th><th>发布日期</th><th>媒介</th>
+          <th>封存时间</th><th>当前状态</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="credentials-body"></tbody>
+    </table>
+    <div id="credential-detail"></div>
+  </section>
+
   <p id="status-line" role="status"></p>
 </main>
 

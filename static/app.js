@@ -13,6 +13,8 @@ const state = {
   detail: null, // {id, title, duration_seconds, speakers, segments, licenses}
   remBatch: [], // 补件批次草稿 [{speaker_id, start, end, allow, deny, embargo, note}]
   remResult: null, // 最近一次补件试算 / 写入结果
+  credentials: [], // 已封存发行凭据列表
+  credentialDetailId: null, // 当前展开查看的凭据 ID
 };
 
 const $ = (id) => document.getElementById(id);
@@ -108,6 +110,7 @@ function render() {
   const has = !!state.detail;
   $("detail-panels").classList.toggle("hidden", !has);
   $("interview-edit").classList.toggle("hidden", !has);
+  $("credential-actions").classList.toggle("hidden", !has);
   if (!has) return;
 
   $("edit-title").value = state.detail.title;
@@ -268,6 +271,7 @@ async function deleteInterview() {
   state.remResult = null;
   clearResults();
   await loadInterviews();
+  await loadCredentials();
 }
 
 /* ---------- 说话人操作 ---------- */
@@ -516,6 +520,156 @@ async function submitRemediate(commit) {
   }
 }
 
+/* ---------- 发行凭据 ---------- */
+
+const CRED_STATUS_META = {
+  current: { label: "一致", cls: "ok" },
+  pending_review: { label: "待复核", cls: "blocked" },
+  source_missing: { label: "来源缺失", cls: "missing" },
+};
+
+async function loadCredentials() {
+  state.credentials = await api("/api/credentials");
+  renderCredentials();
+}
+
+function renderCredentials() {
+  const body = $("credentials-body");
+  const rows = state.credentials.map((c) => {
+    const meta = CRED_STATUS_META[c.recheck.status]
+      || { label: c.recheck.status, cls: "missing" };
+    const sourceTitle = c.recheck.status === "source_missing"
+      ? `<span class="missing-text">${esc(c.interview_title)}（访谈已删除）</span>`
+      : esc(c.interview_title);
+    return `
+    <tr>
+      <td>#${c.id}</td>
+      <td>#${c.interview_id} ${sourceTitle}</td>
+      <td>${esc(c.publication_date)}</td>
+      <td>${c.medium === "audio" ? "音频" : "文字"}</td>
+      <td class="tc">${esc(c.sealed_at)}</td>
+      <td><span class="badge ${meta.cls}">${meta.label}</span></td>
+      <td><button onclick="run(() => showCredential(${c.id}))">查看凭据</button></td>
+    </tr>`;
+  });
+  body.innerHTML = rows.join("")
+    || `<tr><td colspan="7" class="empty">尚未封存任何发行凭据</td></tr>`;
+  if (state.credentialDetailId) {
+    const c = state.credentials.find(
+      (x) => x.id === state.credentialDetailId);
+    if (c) renderCredentialDetail(c);
+    else $("credential-detail").innerHTML = "";
+  }
+}
+
+function changesText(recheck) {
+  const labels = {
+    duration: "时长", speakers: "说话人",
+    segments: "发言", licenses: "授权",
+  };
+  const changed = Object.keys(labels).filter((k) => recheck.changes[k]);
+  return changed.map((k) => labels[k]).join("、");
+}
+
+function credentialIntervalsTable(intervals) {
+  return `
+    <table>
+      <thead>
+        <tr><th>区间（时间码）</th><th>时长</th><th>结果</th><th>说话人</th><th>原因 / 说明</th></tr>
+      </thead>
+      <tbody>${intervalRowsHtml(intervals)}</tbody>
+    </table>`;
+}
+
+function renderCredentialDetail(c) {
+  const box = $("credential-detail");
+  const meta = CRED_STATUS_META[c.recheck.status]
+    || { label: c.recheck.status, cls: "missing" };
+  const sealedIn = c.sealed.input;
+  const sealedEval = c.sealed.evaluation;
+  const mediumLabel = c.medium === "audio" ? "音频" : "文字";
+  let recheckHtml;
+  if (c.recheck.status === "source_missing") {
+    recheckHtml = `
+      <p class="missing-text">✘ 来源访谈 #${c.interview_id} 已删除，无法重新读取资料；
+      以下仅展示封存时的历史凭据，仍可查看。</p>`;
+  } else {
+    const changed = changesText(c.recheck);
+    const head = c.recheck.status === "current"
+      ? `<p class="ok-text">✔ 当前资料与封存时一致，且整条时间轴仍全部可发布。</p>`
+      : `<p class="bad-text">⚠ 待复核：${changed ? `检测到${esc(changed)}变化` : ""}`
+        + `${changed && c.recheck.blocked.length ? "，" : ""}`
+        + `${c.recheck.blocked.length ? `当前存在 ${c.recheck.blocked.length} 个阻断区间` : ""}。`
+        + `发行时结论保持不变。</p>`;
+    recheckHtml = `
+      ${head}
+      <p class="hint">按发行时的发布日期 <b>${esc(c.publication_date)}</b> 与媒介 <b>${mediumLabel}</b>
+      在一致的读取快照中重新校验：可发布
+      ${fmt(c.recheck.current.summary.publishable_seconds)} / 共
+      ${fmt(c.recheck.current.summary.duration_seconds)}（阻断
+      ${fmt(c.recheck.current.summary.blocked_seconds)}）。</p>
+      ${credentialIntervalsTable(c.recheck.current.intervals)}`;
+  }
+  box.innerHTML = `
+    <div class="credential-view">
+      <h3>凭据 #${c.id} <span class="badge ${meta.cls}">${meta.label}</span></h3>
+      <div class="summary">
+        来源访谈 <b>#${c.interview_id} ${esc(c.interview_title)}</b> ·
+        发布日期 <b>${esc(c.publication_date)}</b> · 媒介 <b>${mediumLabel}</b> ·
+        封存时间 <b>${esc(c.sealedAt || c.sealed_at || "")}</b>
+      </div>
+      <h4>发行时结论（封存，不可修改）</h4>
+      <p class="hint ok-text">✔ 封存时整条时间轴全部可发布：可发布
+      ${fmt(sealedEval.summary.publishable_seconds)} / 共
+      ${fmt(sealedEval.summary.duration_seconds)}（阻断
+      ${fmt(sealedEval.summary.blocked_seconds)}）。
+      封存输入：时长 ${fmt(sealedIn.duration_seconds)}，说话人
+      ${sealedIn.speakers.length} 人，发言区间
+      ${sealedIn.segments.length} 条，授权
+      ${sealedIn.licenses.length} 条。</p>
+      ${credentialIntervalsTable(sealedEval.intervals)}
+      <h4>当前复核</h4>
+      ${recheckHtml}
+    </div>`;
+}
+
+async function showCredential(id) {
+  const c = await api(`/api/credentials/${id}`);
+  const idx = state.credentials.findIndex((x) => x.id === id);
+  if (idx >= 0) state.credentials[idx] = c;
+  else state.credentials.unshift(c);
+  state.credentialDetailId = id;
+  renderCredentials();
+}
+
+async function issueCredential() {
+  const publication_date = $("pub-date").value;
+  const medium = $("medium").value;
+  if (!publication_date) throw new Error("请选择发布日期");
+  let resp;
+  try {
+    resp = await fetch(
+      `/api/interviews/${state.currentId}/credentials`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ publication_date, medium }),
+      });
+  } catch (e) {
+    throw new Error("无法连接服务器");
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (resp.status === 409) {
+    renderResults({
+      medium, publication_date,
+      intervals: data.intervals, summary: data.summary,
+    });
+    throw new Error(data.error || "整条时间轴并非全部可发布，未保存凭据");
+  }
+  if (!resp.ok) throw new Error(data.error || `请求失败（HTTP ${resp.status}）`);
+  state.credentialDetailId = data.id;
+  await loadCredentials();
+}
+
 /* ---------- 启动 ---------- */
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -531,6 +685,8 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-rem-add").addEventListener("click", () => run(addRemRow));
   $("btn-rem-dry").addEventListener("click", () => run(() => submitRemediate(false)));
   $("btn-rem-commit").addEventListener("click", () => run(() => submitRemediate(true)));
+  $("btn-issue-credential").addEventListener("click", () => run(issueCredential));
+  $("btn-refresh-credentials").addEventListener("click", () => run(loadCredentials));
   $("interview-select").addEventListener("change", (e) => run(async () => {
     state.currentId = Number(e.target.value) || null;
     state.remBatch = [];
@@ -539,5 +695,8 @@ window.addEventListener("DOMContentLoaded", () => {
     render();
     clearResults();
   }));
-  run(loadInterviews);
+  run(async () => {
+    await loadInterviews();
+    await loadCredentials();
+  });
 });

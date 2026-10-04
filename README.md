@@ -51,6 +51,12 @@ python app.py          # 默认监听 8000 端口，可用 PORT 环境变量修�
    （说话人、半开时间区间、允许 / 拒绝媒介、解禁日期），先点「试算（不写入）」
    查看合并前后的时间轴对比；确认整条时间轴均可发布后点「补件并写入」一次性落库。
    仍有阻断时不落任何记录，并列出每个阻断区间及原因。
+7. **发行凭据**：整条时间轴可发布后，在「发行凭据」卡片点「为当前访谈封存发行凭据」，
+   系统在同一事务中读取时长、说话人、发言与授权并重新校验，全部可发布才保存一条
+   **不可修改**的凭据，封存当时的完整输入与校验结果；失败不留任何记录。
+   凭据列表与详情始终保留发行时结论，并在一致的读取快照中比较现有资料、重新校验：
+   时长、说话人、发言或授权有任何变化都标为**待复核**（即便仍可发布，也列出当前阻断区间）；
+   原访谈被删除时显示**来源缺失**，历史凭据仍可查看。
 
 所有记录均可在页面上直接修改、保存或删除。
 
@@ -117,6 +123,56 @@ curl -s -X POST http://localhost:8000/api/interviews/1/remediate \
                         "allow_media": ["audio"], "note": "补签授权"}]}'
 ```
 
+## 发行凭据（封存不可修改的发行结论）
+
+正式发行时，可针对访谈、发布日期与媒介封存一条凭据。系统在同一 SQLite 事务
+（`BEGIN IMMEDIATE`）中读取访谈时长、说话人、发言区间与授权，按既有规则校验：
+
+1. **仅当整条时间轴全部可发布时**才写入凭据，把当时的完整输入
+   （时长、说话人、发言、授权）与完整校验结果（区间、汇总）一并封存；
+2. 存在不可发布区间时整体回滚（HTTP 409，返回每个阻断区间及原因），
+   参数非法返回 400、访谈不存在返回 404 —— 失败一律不留任何记录；
+3. 凭据只有创建与查阅，**不提供修改 / 删除接口**；
+4. 查阅凭据时在一个只读事务的**一致读取快照**中重新读取现有资料，
+   按发行时的发布日期与媒介重新校验，并与封存输入逐项比较：
+   - 时长 / 说话人 / 发言 / 授权任一变化，或当前存在阻断区间 → `pending_review`（待复核），
+     即便仍全部可发布也会列出当前阻断区间（此时为空列表）；
+   - 无变化且仍全部可发布 → `current`（一致）；
+   - 原访谈已删除 → `source_missing`（来源缺失），`current` 为空，
+     但凭据与封存结论 `sealed` 仍可查看。
+
+接口：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/interviews/<id>/credentials` | 封存凭据 `{publication_date, medium}`，成功 201；仍有阻断 409 不留记录 |
+| GET | `/api/credentials` | 凭据列表（新封存在前，逐条含当前复核状态） |
+| GET | `/api/credentials/<id>` | 凭据详情：`sealed`（封存输入 + 校验结果）+ `recheck`（当前复核） |
+
+`recheck` 结构：`status`（`current` / `pending_review` / `source_missing`）、
+`status_label`、`changes`（`duration` / `speakers` / `segments` / `licenses`
+四个布尔值，表示与封存输入是否不同）、`current`（现有资料 + 按发行参数重算的
+区间与汇总，来源缺失时为 `null`）、`blocked`（当前阻断区间列表）。
+
+调用示例（沿用上面补件完成后的可发布访谈）：
+
+```bash
+# 封存：整条时间轴可发布 -> 201，返回封存内容与即时复核（current）
+curl -s -X POST http://localhost:8000/api/interviews/1/credentials \
+  -H 'Content-Type: application/json' \
+  -d '{"publication_date": "2026-10-04", "medium": "audio"}'
+
+# 仍有阻断区间时 -> 409，返回阻断区间及原因，不保存任何凭据
+curl -s -i -X POST http://localhost:8000/api/interviews/1/credentials \
+  -H 'Content-Type: application/json' \
+  -d '{"publication_date": "2026-10-04", "medium": "text"}'
+
+# 查阅列表 / 详情：发行时结论（sealed）原样保留，recheck 反映当前状态
+curl -s http://localhost:8000/api/credentials
+curl -s http://localhost:8000/api/credentials/1
+# 删除原访谈后再查 -> recheck.status = "source_missing"，sealed 仍完整
+```
+
 ## 数据持久化
 
 - 容器内数据库为 `/data/oral_history.db`，Compose / 运行命令已挂载卷 `oral_history_data`，重启不丢数据。
@@ -138,6 +194,9 @@ curl -s -X POST http://localhost:8000/api/interviews/1/remediate \
 | PUT / DELETE | `/api/licenses/<id>` | 修改 / 删除授权 |
 | POST | `/api/interviews/<id>/evaluate` | 校验 `{publication_date, medium}`，返回合并后的时间码区间与原因 |
 | POST | `/api/interviews/<id>/remediate` | 补件并复核 `{publication_date, medium, commit, supplements}`，同一事务试算 + 满足条件才一次性写入 |
+| POST | `/api/interviews/<id>/credentials` | 封存发行凭据 `{publication_date, medium}`：同一事务读取并校验，整条时间轴可发布才保存不可修改凭据（201），否则不留记录（409） |
+| GET | `/api/credentials` | 凭据列表（含发行时结论与当前复核状态） |
+| GET | `/api/credentials/<id>` | 凭据详情：封存输入 / 校验结果 + 当前复核（待复核 / 一致 / 来源缺失） |
 
 ## 运行测试
 
@@ -145,8 +204,13 @@ curl -s -X POST http://localhost:8000/api/interviews/1/remediate \
 python -m unittest test_evaluator.py -v   # 核心校验逻辑 + 补件批次校验（纯 Python）
 python -m unittest test_remediation.py -v # 补件事务编排（纯 Python + SQLite）
 python -m unittest test_remediate_api.py -v  # HTTP 层（需 Flask，Docker 镜像内可运行）
+python -m unittest test_credentials.py -v    # 发行凭据事务编排（纯 Python + SQLite）
+python -m unittest test_credentials_api.py -v # 发行凭据 HTTP 层（需 Flask）
 node test_frontend.js                     # 前端交互冒烟测试（可选，需 Node）
 ```
+
+> 注：各 API 测试模块在导入期创建各自的临时数据库，请按模块分别运行
+> （`python -m unittest test_xxx.py`），不要把多个 API 测试模块放在同一次 unittest 调用中。
 
 ## 项目结构
 
@@ -154,9 +218,12 @@ node test_frontend.js                     # 前端交互冒烟测试（可选，
 app.py               Flask 应用与 REST API（SQLite 持久化）
 evaluator.py         核心校验逻辑：切分时间轴、逐段判定、相邻合并、补件批次校验
 remediation.py       补件并复核：同一 SQLite 事务中的试算与一次性写入
+credentials.py       发行凭据：同一事务封存不可修改凭据；查阅时一致快照复核（待复核 / 来源缺失）
 test_evaluator.py    核心逻辑单元测试
 test_remediation.py  补件事务编排单元测试（不依赖 Flask）
 test_remediate_api.py 补件接口 HTTP 层测试（需 Flask）
+test_credentials.py  发行凭据事务编排单元测试（不依赖 Flask）
+test_credentials_api.py 发行凭据 HTTP 层测试（需 Flask）
 templates/index.html 单页界面
 static/app.js        前端交互（原生 JavaScript）
 static/style.css     样式
